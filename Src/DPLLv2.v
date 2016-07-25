@@ -64,13 +64,20 @@
 //  nal passed to the loop filter.
 //
 //  A Lock output is provided. The module considers Lock to have been achieved
-//  when the magnitude of the error is less than ±1.
+//  when the magnitude of the error is less than ±15.
 //
 // Dependencies:    None
 //
 // Revision History:
 //
 //  1.00    14I21   MAM     Initial development of this version of the DPLL.
+//
+//  1.10    16G24   MAM     Modified some comments. Partially corrected logic to
+//                          coast and re-lock following loss of xPPS_In signal.
+//
+//  2.00    16G24   MAM     Completed correction of logic to coast and re-lock 
+//                          following loss of xPPS_In signal. Recovery logic
+//                          different for DPLL using Phase-Frequency Detector.
 //
 // Additional Comments:
 //
@@ -85,12 +92,12 @@ module DPLLv2 #(
 
     parameter pRefScaleFactor = 1,                  // Frequency Scale Factor
 
-    //parameter pPosFreqPhiBase = 32'h0000_0086,      // 1 cycle, 10@32 MHz, 1Hz
-    //parameter pNegFreqPhiBase = 32'hFFFF_FF7A,      //-1 cycle, 10@32 MHz, 1Hz
-    parameter pPosFreqPhiBase = 32'h0000_0059,      // 1 cycle, 10@48 MHz, 1Hz
-    parameter pNegFreqPhiBase = 32'hFFFF_FFA7,      //-1 cycle, 10@48 MHz, 1Hz
-    //parameter pPosFreqPhiBase = 32'h0000_002B,     // 1 cycle, 10@100 MHz, 1Hz
-    //parameter pNegFreqPhiBase = 32'hFFFF_FFD5,     //-1 cycle, 10@100 MHz, 1Hz
+    //parameter pPosFreqPhiBase = 32'h0000_0086,      // 1 cycle, 1@32 MHz
+    //parameter pNegFreqPhiBase = 32'hFFFF_FF7A,      //-1 cycle, 1@32 MHz
+    parameter pPosFreqPhiBase = 32'h0000_0059,      // 1 cycle, 1@48 MHz
+    parameter pNegFreqPhiBase = 32'hFFFF_FFA7,      //-1 cycle, 1@48 MHz
+    //parameter pPosFreqPhiBase = 32'h0000_002B,     // 1 cycle, 1@100 MHz
+    //parameter pNegFreqPhiBase = 32'hFFFF_FFD5,     //-1 cycle, 1@100 MHz
 
     parameter pAlpha       = 1,                     // NCO Filter Time Constant
     parameter pErrCntrLen  = 6                      // Phase Error Counter Len
@@ -182,7 +189,7 @@ assign xPPS_Out = xPPS; // Instrument external 1PPS synchcronized pulse
 
 //  Set Enable FF when first xPPS detected, Clr Enable FF when xPPS missing
 
-assign CE_DPLL_En = (xPPS | xPPS_Missing);
+assign CE_DPLL_En = (xPPS | xPPS_Missing | (Lock & Rst_LockCntr));
 
 always @(posedge Clk)
 begin
@@ -225,7 +232,7 @@ end
 //  Generate a 1PPS signal based on the internal CE_NCO
 //
 
-assign Rst_iPPS_Cntr = (Rst | ((DPLL_En) ? CE_LockCntr : iPPS));
+assign Rst_iPPS_Cntr = (Rst | ((DPLL_En & ~PPSGate) ? CE_LockCntr : iPPS));
 
 always @(posedge Clk)
 begin
@@ -256,7 +263,8 @@ assign iPPS_Out = iPPS;
 
 always @(posedge Clk)
 begin
-    if(Rst & ~DPLL_En)
+    if(Rst | ~DPLL_En)
+//        {Up, Dn} <= #1 {(xPPS & PPSGate), 1'b0};
         {Up, Dn} <= #1 0;
     else if(DPLL_En)
         case({Up, Dn, xPPS, iPPS})
@@ -282,14 +290,15 @@ end
 //  Set the error value based on the value of the {Up, Dn} FFs
 
 assign Rst_Err = (Rst | ~DPLL_En | (xPPS & Dn) | (iPPS & Up));
-assign CE_Err  = ((xPPS ^ iPPS) & (~Up & ~Dn));
+assign CE_Err  = (CE_NCO & ~ErrLim & ((xPPS | Up) | (iPPS | Dn)));
 
 always @(posedge Clk)
 begin
     if(Rst_Err)
         Err <= #1 0;
     else if(CE_Err)
-        Err <= #1 ((xPPS) ? pPosFreqPhiBase : pNegFreqPhiBase);
+        Err <= #1 Err + ((xPPS | Up) ? pPosFreqPhiBase
+                                     : (iPPS | Dn) ? pNegFreqPhiBase : 0);
 end
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -298,7 +307,7 @@ end
 //  Integrate/Accumulate phase error for NCO Frequecy Control Word
 //
 
-assign CE_PhiErr = (CE_NCO & ~ErrLim);
+assign CE_PhiErr = (CE_NCO & ~ErrLim & ((xPPS & Dn) | (iPPS & Up)));
 
 always @(posedge Clk)
 begin
@@ -442,7 +451,7 @@ end
 
 always @(posedge Clk)
 begin
-    if(Rst)
+    if(Rst | (xPPS & ~DPLL_En))
         xPPS_TFF <= #1 1;
     else if(xPPS & DPLL_En)
         xPPS_TFF <= #1 ~xPPS_TFF;
